@@ -499,30 +499,14 @@ class MelVoco(AudioEncoderDecoder):
 
     @property
     def downsample_factor(self):
-        raise NotImplementedError
+        return self.hop_length
 
     @property
     def latent_dim(self):
-        return self.num_mels
+        return self.n_mels
 
     def encode(self, audio):
-        stft_transform = T.Spectrogram(
-            n_fft = self.n_fft,
-            win_length = self.win_length,
-            hop_length = self.hop_length,
-            window_fn = torch.hann_window
-        )
-
-        spectrogram = stft_transform(audio)
-
-        mel_transform = T.MelScale(
-            n_mels = self.n_mels,
-            sample_rate = self.sampling_rate,
-            n_stft = self.n_fft // 2 + 1,
-            f_max = self.f_max
-        )
-
-        mel = mel_transform(spectrogram)
+        mel = self.vocos.feature_extractor(audio)
 
         if self.log:
             mel = T.AmplitudeToDB()(mel)
@@ -614,10 +598,8 @@ class DurationPredictor(Module):
 
         self.audio_enc_dec = audio_enc_dec
 
-        if exists(audio_enc_dec) and dim != audio_enc_dec.latent_dim:
-            self.proj_in = nn.Linear(audio_enc_dec.latent_dim, dim)
-        else:
-            self.proj_in = nn.Identity()
+        # cond: scalar, ground-truth duration
+        self.proj_in = nn.Linear(1, dim)
 
         # phoneme related
 
@@ -669,8 +651,9 @@ class DurationPredictor(Module):
         # if we are using mel spec with 80 channels, we need to set attn_channels to 80
         # dim_in assuming we have spec with 80 channels
 
-        self.aligner = Aligner(dim_hidden = dim_phoneme_emb, **aligner_kwargs)
-        self.align_loss = ForwardSumLoss()
+        if aligner_kwargs is not None:
+            self.aligner = Aligner(dim_in = audio_enc_dec.latent_dim, dim_hidden = dim_phoneme_emb, **aligner_kwargs)
+            self.align_loss = ForwardSumLoss()
 
     @property
     def device(self):
@@ -719,28 +702,36 @@ class DurationPredictor(Module):
     @beartype
     def forward_aligner(
         self,
-        x: FloatTensor,     # (b, t, c)
-        x_mask: IntTensor,  # (b, 1, t)
-        y: FloatTensor,     # (b, t, c)
-        y_mask: IntTensor   # (b, 1, t)
+        x: FloatTensor,     # (b, tx, c)
+        x_mask: IntTensor,  # (b, 1, tx)
+        y: FloatTensor,     # (b, ty, c)
+        y_mask: IntTensor   # (b, 1, ty)
     ) -> Tuple[
-        FloatTensor,        # alignment_hard: (b, t)
+        FloatTensor,        # alignment_hard: (b, tx)
         FloatTensor,        # alignment_soft: (b, tx, ty)
         FloatTensor,        # alignment_logprob: (b, 1, ty, tx)
         BoolTensor          # alignment_mas: (b, tx, ty)
     ]:
-        attn_mask = rearrange(x_mask, 'b 1 t -> b 1 t 1') * rearrange(y_mask, 'b 1 t -> b 1 1 t')
-        alignment_soft, alignment_logprob = self.aligner(rearrange(y, 'b t c -> b c t'), x, x_mask)
+        """
+        Args:
+            x: phone
+            y: mel
+        """
+        y = rearrange(y, 'b ty c -> b c ty')
+        attn_mask = rearrange(x_mask, 'b 1 tx -> b 1 tx 1') * rearrange(y_mask, 'b 1 ty -> b 1 1 ty')
+        alignment_soft, alignment_logprob = self.aligner.aligner(
+            rearrange(y, 'b ty c -> b c ty'), rearrange(x, 'b tx c -> b c tx'), x_mask
+        )
 
         assert not torch.isnan(alignment_soft).any()
 
         alignment_mas = maximum_path(
-            rearrange(alignment_soft, 'b 1 t1 t2 -> b t2 t1').contiguous(),
-            rearrange(attn_mask, 'b 1 t1 t2 -> b t1 t2').contiguous()
+            rearrange(alignment_soft, 'b 1 ty tx -> b tx ty').contiguous(),
+            rearrange(attn_mask, 'b 1 tx ty -> b tx ty').contiguous()
         )
 
         alignment_hard = torch.sum(alignment_mas, -1).float()
-        alignment_soft = rearrange(alignment_soft, 'b 1 t1 t2 -> b t2 t1')
+        alignment_soft = rearrange(alignment_soft, 'b 1 ty tx -> b tx ty')
         return alignment_hard, alignment_soft, alignment_logprob, alignment_mas
 
     @beartype
@@ -761,15 +752,21 @@ class DurationPredictor(Module):
         self_attn_mask = None,
         return_aligned_phoneme_ids = False
     ):
-        batch, seq_len, cond_dim = cond.shape
+        batch, seq_len = cond.shape[:2]
+        
+        # create dummy cond when not given, become purely unconditional regression model
+        if not exists(cond):
+            cond = torch.zeros_like(phoneme_ids)
+            cond_drop_prob = 1
 
+        cond = rearrange(cond, 'b t -> b t 1')
         cond = self.proj_in(cond)
 
         # text to phonemes, if tokenizer is given
 
         if not exists(phoneme_ids):
             assert exists(self.tokenizer)
-            phoneme_ids = self.tokenizer.texts_to_tensor_ids(texts)
+            phoneme_ids = self.tokenizer.texts_to_tensor_ids(texts).to(self.device)
 
         # construct mask if not given
 
