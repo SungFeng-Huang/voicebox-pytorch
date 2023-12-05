@@ -752,7 +752,13 @@ class DurationPredictor(Module):
         self_attn_mask = None,
         return_aligned_phoneme_ids = False
     ):
-        batch, seq_len = cond.shape[:2]
+        # text to phonemes, if tokenizer is given
+
+        if not exists(phoneme_ids):
+            assert exists(self.tokenizer)
+            phoneme_ids = self.tokenizer.texts_to_tensor_ids(texts).to(self.device)
+
+        batch, seq_len = phoneme_ids.shape
         
         # create dummy cond when not given, become purely unconditional regression model
         if not exists(cond):
@@ -761,12 +767,6 @@ class DurationPredictor(Module):
 
         cond = rearrange(cond, 'b t -> b t 1')
         cond = self.proj_in(cond)
-
-        # text to phonemes, if tokenizer is given
-
-        if not exists(phoneme_ids):
-            assert exists(self.tokenizer)
-            phoneme_ids = self.tokenizer.texts_to_tensor_ids(texts).to(self.device)
 
         # construct mask if not given
 
