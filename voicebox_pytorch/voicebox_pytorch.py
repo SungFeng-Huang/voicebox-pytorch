@@ -590,7 +590,7 @@ class DurationPredictor(Module):
         use_gateloop_layers = False,
         p_drop_prob = 0.2, # p_drop in paper
         frac_lengths_mask: Tuple[float, float] = (0.1, 1.),
-        aligner_kwargs: dict = dict(dim_in = 80, attn_channels = 80)
+        aligner_kwargs: dict | None = dict(dim_in = 80, attn_channels = 80)
     ):
         super().__init__()
 
