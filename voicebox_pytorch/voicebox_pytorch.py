@@ -590,7 +590,8 @@ class DurationPredictor(Module):
         use_gateloop_layers = False,
         p_drop_prob = 0.2, # p_drop in paper
         frac_lengths_mask: Tuple[float, float] = (0.1, 1.),
-        aligner_kwargs: dict | None = dict(dim_in = 80, attn_channels = 80)
+        aligner_kwargs: Optional[dict] = dict(dim_in = 80, attn_channels = 80),
+        **kwargs
     ):
         super().__init__()
 
@@ -651,7 +652,7 @@ class DurationPredictor(Module):
         # if we are using mel spec with 80 channels, we need to set attn_channels to 80
         # dim_in assuming we have spec with 80 channels
 
-        if aligner_kwargs is not None:
+        if aligner_kwargs is not None and len(aligner_kwargs):
             self.aligner = Aligner(dim_in = audio_enc_dec.latent_dim, dim_hidden = dim_phoneme_emb, **aligner_kwargs)
             self.align_loss = ForwardSumLoss()
 
@@ -734,6 +735,12 @@ class DurationPredictor(Module):
         alignment_soft = rearrange(alignment_soft, 'b 1 ty tx -> b tx ty')
         return alignment_hard, alignment_soft, alignment_logprob, alignment_mas
 
+    def to_phoneme_ids(self, texts, phoneme_ids):
+        if not exists(phoneme_ids):
+            assert exists(self.tokenizer)
+            phoneme_ids = self.tokenizer.texts_to_tensor_ids(texts).to(self.device)
+        return phoneme_ids
+
     @beartype
     def forward(
         self,
@@ -753,10 +760,7 @@ class DurationPredictor(Module):
         return_aligned_phoneme_ids = False
     ):
         # text to phonemes, if tokenizer is given
-
-        if not exists(phoneme_ids):
-            assert exists(self.tokenizer)
-            phoneme_ids = self.tokenizer.texts_to_tensor_ids(texts).to(self.device)
+        phoneme_ids = self.to_phoneme_ids(texts, phoneme_ids)
 
         batch, seq_len = phoneme_ids.shape
         
