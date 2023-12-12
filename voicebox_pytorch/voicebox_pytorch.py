@@ -508,17 +508,11 @@ class MelVoco(AudioEncoderDecoder):
     def encode(self, audio):
         mel = self.vocos.feature_extractor(audio)
 
-        if self.log:
-            mel = T.AmplitudeToDB()(mel)
-
         mel = rearrange(mel, 'b d n -> b n d')
         return mel
 
     def decode(self, mel):
         mel = rearrange(mel, 'b n d -> b d n')
-
-        if self.log:
-            mel = DB_to_amplitude(mel, ref = 1., power = 0.5)
 
         return self.vocos.decode(mel)
 
