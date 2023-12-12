@@ -671,7 +671,7 @@ class DurationPredictor(Module):
         **kwargs
     ):
         if exists(texts):
-            phoneme_ids = self.tokenizer.texts_to_tensor_ids(texts)
+            phoneme_ids = self.to_phoneme_ids(texts, phoneme_ids)
 
         forward_kwargs = dict(
             return_aligned_phoneme_ids = False,
