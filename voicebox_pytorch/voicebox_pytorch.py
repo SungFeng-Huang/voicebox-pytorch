@@ -741,6 +741,14 @@ class DurationPredictor(Module):
             phoneme_ids = self.tokenizer.texts_to_tensor_ids(texts).to(self.device)
         return phoneme_ids
 
+    def create_cond_mask(self, batch, seq_len):
+        if coin_flip():
+            frac_lengths = torch.zeros((batch,), device = self.device).float().uniform_(*self.frac_lengths_mask)
+            cond_mask = mask_from_frac_lengths(seq_len, frac_lengths)
+        else:
+            cond_mask = prob_mask_like((batch, seq_len), self.p_drop_prob, self.device)
+        return cond_mask
+
     @beartype
     def forward(
         self,
@@ -762,8 +770,6 @@ class DurationPredictor(Module):
         # text to phonemes, if tokenizer is given
         phoneme_ids = self.to_phoneme_ids(texts, phoneme_ids)
 
-        batch, seq_len = phoneme_ids.shape
-        
         # create dummy cond when not given, become purely unconditional regression model
         if not exists(cond):
             cond = torch.zeros_like(phoneme_ids)
@@ -773,18 +779,13 @@ class DurationPredictor(Module):
         cond = self.proj_in(cond)
 
         # construct mask if not given
-
         if not exists(cond_mask):
-            if coin_flip():
-                frac_lengths = torch.zeros((batch,), device = self.device).float().uniform_(*self.frac_lengths_mask)
-                cond_mask = mask_from_frac_lengths(seq_len, frac_lengths)
-            else:
-                cond_mask = prob_mask_like((batch, seq_len), self.p_drop_prob, self.device)
+            batch, seq_len = phoneme_ids.shape
+            cond_mask = self.create_cond_mask(batch=batch, seq_len=seq_len)
 
         cond = cond * rearrange(~cond_mask, '... -> ... 1')
 
         # classifier free guidance
-
         if cond_drop_prob > 0.:
             cond_drop_mask = prob_mask_like(cond.shape[:1], cond_drop_prob, cond.device)
 
@@ -795,22 +796,17 @@ class DurationPredictor(Module):
             )
 
         # phoneme id of -1 is padding
-
         if not exists(self_attn_mask):
             self_attn_mask = phoneme_ids != -1
-
         phoneme_ids = phoneme_ids.clamp(min = 0)
 
         # get phoneme embeddings
-
         phoneme_emb = self.to_phoneme_emb(phoneme_ids)
 
         # force condition to be same length as input phonemes
-
         cond = curtail_or_pad(cond, phoneme_ids.shape[-1])
 
         # combine audio, phoneme, conditioning
-
         embed = torch.cat((phoneme_emb, cond), dim = -1)
         x = self.to_embed(embed)
 
