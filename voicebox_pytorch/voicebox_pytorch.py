@@ -1007,7 +1007,7 @@ class VoiceBox(Module):
                 cond_mask = mask_from_frac_lengths(seq_len, frac_lengths)
         else:
             if not exists(cond_mask):
-                cond_mask = torch.ones((batch, seq_len), device = cond.device, dtype = torch.bool)
+                cond_mask = torch.zeros((batch, seq_len), device = cond.device, dtype = torch.bool)
 
         cond_mask_with_pad_dim = rearrange(cond_mask, '... -> ... 1')
 
@@ -1032,6 +1032,17 @@ class VoiceBox(Module):
                 rearrange(cond_drop_mask, '... -> ... 1'),
                 self.null_cond_id,
                 cond_token_ids
+            )
+        
+        # spectrogram dropout
+
+        if self.training:
+            p_drop_mask = prob_mask_like(cond.shape[:1], self.p_drop_prob, self.device)
+
+            cond = torch.where(
+                rearrange(p_drop_mask, '... -> ... 1 1'),
+                self.null_cond,
+                cond
             )
 
         # phoneme or semantic conditioning embedding
