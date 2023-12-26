@@ -736,11 +736,15 @@ class DurationPredictor(Module):
         return phoneme_ids
 
     def create_cond_mask(self, batch, seq_len):
-        if coin_flip():
-            frac_lengths = torch.zeros((batch,), device = self.device).float().uniform_(*self.frac_lengths_mask)
-            cond_mask = mask_from_frac_lengths(seq_len, frac_lengths)
+        if self.training:
+            if coin_flip():
+                frac_lengths = torch.zeros((batch,), device = self.device).float().uniform_(*self.frac_lengths_mask)
+                cond_mask = mask_from_frac_lengths(seq_len, frac_lengths)
+            else:
+                cond_mask = prob_mask_like((batch, seq_len), self.p_drop_prob, self.device)
         else:
-            cond_mask = prob_mask_like((batch, seq_len), self.p_drop_prob, self.device)
+            cond_mask = torch.zeros((batch, seq_len), device = self.device, dtype = torch.bool)
+
         return cond_mask
 
     @beartype
