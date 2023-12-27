@@ -735,8 +735,8 @@ class DurationPredictor(Module):
             phoneme_ids = self.tokenizer.texts_to_tensor_ids(texts).to(self.device)
         return phoneme_ids
 
-    def create_cond_mask(self, batch, seq_len):
-        if self.training:
+    def create_cond_mask(self, batch, seq_len, training=True):
+        if training:
             if coin_flip():
                 frac_lengths = torch.zeros((batch,), device = self.device).float().uniform_(*self.frac_lengths_mask)
                 cond_mask = mask_from_frac_lengths(seq_len, frac_lengths)
