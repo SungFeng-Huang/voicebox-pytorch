@@ -655,7 +655,7 @@ class DurationPredictor(Module):
         return next(self.parameters()).device
 
     def align_phoneme_ids_with_durations(self, phoneme_ids, durations):
-        repeat_mask = generate_mask_from_repeats(durations.clamp(min = 1))
+        repeat_mask = generate_mask_from_repeats(durations.clamp(min = 0))
         aligned_phoneme_ids = einsum('b i, b i j -> b j', phoneme_ids.float(), repeat_mask.float()).long()
         return aligned_phoneme_ids
 
