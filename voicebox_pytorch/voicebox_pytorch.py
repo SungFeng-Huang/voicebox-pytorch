@@ -227,24 +227,28 @@ class ConvPositionEmbed(Module):
 class RMSNorm(Module):
     def __init__(
         self,
-        dim
+        dim,
+        normalized_shape=-1,
     ):
         super().__init__()
         self.scale = dim ** 0.5
         self.gamma = nn.Parameter(torch.ones(dim))
+        self.normalized_shape = normalized_shape
 
     def forward(self, x):
-        return F.normalize(x, dim = -1) * self.scale * self.gamma
+        return F.normalize(x, dim = self.normalized_shape) * self.scale * self.gamma
 
 class AdaptiveRMSNorm(Module):
     def __init__(
         self,
         dim,
-        cond_dim = None
+        cond_dim = None,
+        normalized_shape=-1,
     ):
         super().__init__()
         cond_dim = default(cond_dim, dim)
         self.scale = dim ** 0.5
+        self.normalized_shape = normalized_shape
 
         self.to_gamma = nn.Linear(cond_dim, dim)
         self.to_beta = nn.Linear(cond_dim, dim)
@@ -258,7 +262,7 @@ class AdaptiveRMSNorm(Module):
         nn.init.zeros_(self.to_beta.bias)
 
     def forward(self, x, *, cond):
-        normed = F.normalize(x, dim = -1) * self.scale
+        normed = F.normalize(x, dim = self.normalized_shape) * self.scale
 
         gamma, beta = self.to_gamma(cond), self.to_beta(cond)
         gamma, beta = map(lambda t: rearrange(t, 'b d -> b 1 d'), (gamma, beta))
@@ -268,13 +272,14 @@ class AdaptiveRMSNorm(Module):
 # attention
 
 class MultiheadRMSNorm(Module):
-    def __init__(self, dim, heads):
+    def __init__(self, dim, heads, normalized_shape=-1):
         super().__init__()
         self.scale = dim ** 0.5
         self.gamma = nn.Parameter(torch.ones(heads, 1, dim))
+        self.normalized_shape = normalized_shape
 
     def forward(self, x):
-        return F.normalize(x, dim = -1) * self.gamma * self.scale
+        return F.normalize(x, dim = self.normalized_shape) * self.gamma * self.scale
 
 class Attention(Module):
     def __init__(
@@ -285,7 +290,8 @@ class Attention(Module):
         dropout = 0,
         flash = False,
         qk_norm = False,
-        qk_norm_scale = 10
+        qk_norm_scale = 10,
+        qk_norm_shape = -1,
     ):
         super().__init__()
         self.heads = heads
@@ -298,8 +304,8 @@ class Attention(Module):
         self.qk_norm = qk_norm
 
         if qk_norm:
-            self.q_norm = MultiheadRMSNorm(dim_head, heads = heads)
-            self.k_norm = MultiheadRMSNorm(dim_head, heads = heads)
+            self.q_norm = MultiheadRMSNorm(dim_head, heads = heads, normalized_shape=qk_norm_shape)
+            self.k_norm = MultiheadRMSNorm(dim_head, heads = heads, normalized_shape=qk_norm_shape)
 
         self.to_qkv = nn.Linear(dim, dim_inner * 3, bias = False)
         self.to_out = nn.Linear(dim_inner, dim, bias = False)
@@ -360,6 +366,7 @@ class Transformer(Module):
         attn_qk_norm = False,
         use_gateloop_layers = False,
         gateloop_use_jax = False,
+        rmsnorm_shape = -1,
     ):
         super().__init__()
         assert divisible_by(depth, 2)
@@ -387,13 +394,13 @@ class Transformer(Module):
             self.layers.append(nn.ModuleList([
                 nn.Linear(dim * 2, dim) if has_skip else None,
                 GateLoop(dim = dim, use_jax_associative_scan = gateloop_use_jax) if use_gateloop_layers else None,
-                rmsnorm_klass(dim = dim),
-                Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = attn_dropout, flash = attn_flash, qk_norm = attn_qk_norm),
-                rmsnorm_klass(dim = dim),
+                rmsnorm_klass(dim = dim, normalized_shape=rmsnorm_shape),
+                Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = attn_dropout, flash = attn_flash, qk_norm = attn_qk_norm, qk_norm_shape=rmsnorm_shape),
+                rmsnorm_klass(dim = dim, normalized_shape=rmsnorm_shape),
                 FeedForward(dim = dim, mult = ff_mult, dropout = ff_dropout)
             ]))
 
-        self.final_norm = RMSNorm(dim)
+        self.final_norm = RMSNorm(dim, normalized_shape=rmsnorm_shape)
 
     @property
     def device(self):
@@ -584,6 +591,7 @@ class DurationPredictor(Module):
         use_gateloop_layers = False,
         p_drop_prob = 0.2, # p_drop in paper
         frac_lengths_mask: Tuple[float, float] = (0.1, 1.),
+        rmsnorm_shape = -1,
         aligner_kwargs: Optional[dict] = dict(dim_in = 80, attn_channels = 80),
         **kwargs
     ):
@@ -633,6 +641,7 @@ class DurationPredictor(Module):
             attn_dropout=attn_dropout,
             attn_flash = attn_flash,
             attn_qk_norm = attn_qk_norm,
+            rmsnorm_shape = rmsnorm_shape,
             use_gateloop_layers = use_gateloop_layers
         )
 
@@ -884,6 +893,7 @@ class VoiceBox(Module):
         num_register_tokens = 16,
         p_drop_prob = 0.3, # p_drop in paper
         frac_lengths_mask: Tuple[float, float] = (0.7, 1.),
+        rmsnorm_shape = -1,
         condition_on_text = True
     ):
         super().__init__()
@@ -943,6 +953,7 @@ class VoiceBox(Module):
             num_register_tokens = num_register_tokens,
             adaptive_rmsnorm = True,
             adaptive_rmsnorm_cond_dim_in = time_hidden_dim,
+            rmsnorm_shape = rmsnorm_shape,
             use_gateloop_layers = use_gateloop_layers
         )
 
