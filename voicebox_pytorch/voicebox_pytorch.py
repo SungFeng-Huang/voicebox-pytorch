@@ -233,7 +233,7 @@ class RMSNorm(Module):
         super().__init__()
         self.scale = dim ** 0.5
         self.gamma = nn.Parameter(torch.ones(dim))
-        self.normalized_shape = normalized_shape
+        self.normalized_shape = [normalized_shape] if isinstance(normalized_shape, int) else list(normalized_shape)
 
     def forward(self, x):
         return F.normalize(x, dim = self.normalized_shape) * self.scale * self.gamma
@@ -248,7 +248,9 @@ class AdaptiveRMSNorm(Module):
         super().__init__()
         cond_dim = default(cond_dim, dim)
         self.scale = dim ** 0.5
-        self.normalized_shape = normalized_shape
+        # self.normalized_shape = normalized_shape
+        # self.normalized_shape = list(normalized_shape)
+        self.normalized_shape = [normalized_shape] if isinstance(normalized_shape, int) else list(normalized_shape)
 
         self.to_gamma = nn.Linear(cond_dim, dim)
         self.to_beta = nn.Linear(cond_dim, dim)
@@ -276,7 +278,9 @@ class MultiheadRMSNorm(Module):
         super().__init__()
         self.scale = dim ** 0.5
         self.gamma = nn.Parameter(torch.ones(heads, 1, dim))
-        self.normalized_shape = normalized_shape
+        # self.normalized_shape = normalized_shape
+        # self.normalized_shape = list(normalized_shape)
+        self.normalized_shape = [normalized_shape] if isinstance(normalized_shape, int) else list(normalized_shape)
 
     def forward(self, x):
         return F.normalize(x, dim = self.normalized_shape) * self.gamma * self.scale
