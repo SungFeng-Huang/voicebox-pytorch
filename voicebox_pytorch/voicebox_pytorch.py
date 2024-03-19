@@ -237,24 +237,30 @@ class ConvPositionEmbed(Module):
 class RMSNorm(Module):
     def __init__(
         self,
-        dim
+        dim,
+        normalized_shape=-1,
     ):
         super().__init__()
         self.scale = dim ** 0.5
         self.gamma = nn.Parameter(torch.ones(dim))
+        self.normalized_shape = [normalized_shape] if isinstance(normalized_shape, int) else list(normalized_shape)
 
     def forward(self, x):
-        return F.normalize(x, dim = -1) * self.scale * self.gamma
+        return F.normalize(x, dim = self.normalized_shape) * self.scale * self.gamma
 
 class AdaptiveRMSNorm(Module):
     def __init__(
         self,
         dim,
-        cond_dim = None
+        cond_dim = None,
+        normalized_shape=-1,
     ):
         super().__init__()
         cond_dim = default(cond_dim, dim)
         self.scale = dim ** 0.5
+        # self.normalized_shape = normalized_shape
+        # self.normalized_shape = list(normalized_shape)
+        self.normalized_shape = [normalized_shape] if isinstance(normalized_shape, int) else list(normalized_shape)
 
         self.to_gamma = nn.Linear(cond_dim, dim)
         self.to_beta = nn.Linear(cond_dim, dim)
@@ -268,7 +274,7 @@ class AdaptiveRMSNorm(Module):
         nn.init.zeros_(self.to_beta.bias)
 
     def forward(self, x, *, cond):
-        normed = F.normalize(x, dim = -1) * self.scale
+        normed = F.normalize(x, dim = self.normalized_shape) * self.scale
 
         gamma, beta = self.to_gamma(cond), self.to_beta(cond)
         gamma, beta = map(lambda t: rearrange(t, 'b d -> b 1 d'), (gamma, beta))
@@ -278,13 +284,16 @@ class AdaptiveRMSNorm(Module):
 # attention
 
 class MultiheadRMSNorm(Module):
-    def __init__(self, dim, heads):
+    def __init__(self, dim, heads, normalized_shape=-1):
         super().__init__()
         self.scale = dim ** 0.5
         self.gamma = nn.Parameter(torch.ones(heads, 1, dim))
+        # self.normalized_shape = normalized_shape
+        # self.normalized_shape = list(normalized_shape)
+        self.normalized_shape = [normalized_shape] if isinstance(normalized_shape, int) else list(normalized_shape)
 
     def forward(self, x):
-        return F.normalize(x, dim = -1) * self.gamma * self.scale
+        return F.normalize(x, dim = self.normalized_shape) * self.gamma * self.scale
 
 class Attention(Module):
     def __init__(
@@ -295,7 +304,8 @@ class Attention(Module):
         dropout = 0,
         flash = False,
         qk_norm = False,
-        qk_norm_scale = 10
+        qk_norm_scale = 10,
+        qk_norm_shape = -1,
     ):
         super().__init__()
         self.heads = heads
@@ -308,8 +318,8 @@ class Attention(Module):
         self.qk_norm = qk_norm
 
         if qk_norm:
-            self.q_norm = MultiheadRMSNorm(dim_head, heads = heads)
-            self.k_norm = MultiheadRMSNorm(dim_head, heads = heads)
+            self.q_norm = MultiheadRMSNorm(dim_head, heads = heads, normalized_shape=qk_norm_shape)
+            self.k_norm = MultiheadRMSNorm(dim_head, heads = heads, normalized_shape=qk_norm_shape)
 
         self.to_qkv = nn.Linear(dim, dim_inner * 3, bias = False)
         self.to_out = nn.Linear(dim_inner, dim, bias = False)
@@ -370,6 +380,7 @@ class Transformer(Module):
         attn_qk_norm = False,
         use_gateloop_layers = False,
         gateloop_use_jax = False,
+        rmsnorm_shape = -1,
     ):
         super().__init__()
         assert divisible_by(depth, 2)
@@ -397,13 +408,13 @@ class Transformer(Module):
             self.layers.append(nn.ModuleList([
                 nn.Linear(dim * 2, dim) if has_skip else None,
                 GateLoop(dim = dim, use_jax_associative_scan = gateloop_use_jax) if use_gateloop_layers else None,
-                rmsnorm_klass(dim = dim),
-                Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = attn_dropout, flash = attn_flash, qk_norm = attn_qk_norm),
-                rmsnorm_klass(dim = dim),
+                rmsnorm_klass(dim = dim, normalized_shape=rmsnorm_shape),
+                Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = attn_dropout, flash = attn_flash, qk_norm = attn_qk_norm, qk_norm_shape=rmsnorm_shape),
+                rmsnorm_klass(dim = dim, normalized_shape=rmsnorm_shape),
                 FeedForward(dim = dim, mult = ff_mult, dropout = ff_dropout)
             ]))
 
-        self.final_norm = RMSNorm(dim)
+        self.final_norm = RMSNorm(dim, normalized_shape=rmsnorm_shape)
 
     @property
     def device(self):
@@ -509,42 +520,20 @@ class MelVoco(AudioEncoderDecoder):
 
     @property
     def downsample_factor(self):
-        raise NotImplementedError
+        return self.hop_length
 
     @property
     def latent_dim(self):
-        return self.num_mels
+        return self.n_mels
 
     def encode(self, audio):
-        stft_transform = T.Spectrogram(
-            n_fft = self.n_fft,
-            win_length = self.win_length,
-            hop_length = self.hop_length,
-            window_fn = torch.hann_window
-        )
-
-        spectrogram = stft_transform(audio)
-
-        mel_transform = T.MelScale(
-            n_mels = self.n_mels,
-            sample_rate = self.sampling_rate,
-            n_stft = self.n_fft // 2 + 1,
-            f_max = self.f_max
-        )
-
-        mel = mel_transform(spectrogram)
-
-        if self.log:
-            mel = T.AmplitudeToDB()(mel)
+        mel = self.vocos.feature_extractor(audio)
 
         mel = rearrange(mel, 'b d n -> b n d')
         return mel
 
     def decode(self, mel):
         mel = rearrange(mel, 'b n d -> b d n')
-
-        if self.log:
-            mel = DB_to_amplitude(mel, ref = 1., power = 0.5)
 
         return self.vocos.decode(mel)
 
@@ -616,7 +605,9 @@ class DurationPredictor(Module):
         use_gateloop_layers = False,
         p_drop_prob = 0.2, # p_drop in paper
         frac_lengths_mask: Tuple[float, float] = (0.1, 1.),
-        aligner_kwargs: dict = dict(dim_in = 80, attn_channels = 80)
+        rmsnorm_shape = -1,
+        aligner_kwargs: Optional[dict] = dict(dim_in = 80, attn_channels = 80),
+        **kwargs
     ):
         super().__init__()
 
@@ -624,10 +615,8 @@ class DurationPredictor(Module):
 
         self.audio_enc_dec = audio_enc_dec
 
-        if exists(audio_enc_dec) and dim != audio_enc_dec.latent_dim:
-            self.proj_in = nn.Linear(audio_enc_dec.latent_dim, dim)
-        else:
-            self.proj_in = nn.Identity()
+        # cond: scalar, ground-truth duration
+        self.proj_in = nn.Linear(1, dim)
 
         # phoneme related
 
@@ -666,6 +655,7 @@ class DurationPredictor(Module):
             attn_dropout=attn_dropout,
             attn_flash = attn_flash,
             attn_qk_norm = attn_qk_norm,
+            rmsnorm_shape = rmsnorm_shape,
             use_gateloop_layers = use_gateloop_layers
         )
 
@@ -679,15 +669,16 @@ class DurationPredictor(Module):
         # if we are using mel spec with 80 channels, we need to set attn_channels to 80
         # dim_in assuming we have spec with 80 channels
 
-        self.aligner = Aligner(dim_hidden = dim_phoneme_emb, **aligner_kwargs)
-        self.align_loss = ForwardSumLoss()
+        if aligner_kwargs is not None and len(aligner_kwargs):
+            self.aligner = Aligner(dim_in = audio_enc_dec.latent_dim, dim_hidden = dim_phoneme_emb, **aligner_kwargs)
+            self.align_loss = ForwardSumLoss()
 
     @property
     def device(self):
         return next(self.parameters()).device
 
     def align_phoneme_ids_with_durations(self, phoneme_ids, durations):
-        repeat_mask = generate_mask_from_repeats(durations.clamp(min = 1))
+        repeat_mask = generate_mask_from_repeats(durations.clamp(min = 0))
         aligned_phoneme_ids = einsum('b i, b i j -> b j', phoneme_ids.float(), repeat_mask.float()).long()
         return aligned_phoneme_ids
 
@@ -703,7 +694,7 @@ class DurationPredictor(Module):
         **kwargs
     ):
         if exists(texts):
-            phoneme_ids = self.tokenizer.texts_to_tensor_ids(texts)
+            phoneme_ids = self.to_phoneme_ids(texts, phoneme_ids)
 
         forward_kwargs = dict(
             return_aligned_phoneme_ids = False,
@@ -729,29 +720,55 @@ class DurationPredictor(Module):
     @beartype
     def forward_aligner(
         self,
-        x: FloatTensor,     # (b, t, c)
-        x_mask: IntTensor,  # (b, 1, t)
-        y: FloatTensor,     # (b, t, c)
-        y_mask: IntTensor   # (b, 1, t)
+        x: FloatTensor,     # (b, tx, c)
+        x_mask: IntTensor,  # (b, 1, tx)
+        y: FloatTensor,     # (b, ty, c)
+        y_mask: IntTensor   # (b, 1, ty)
     ) -> Tuple[
-        FloatTensor,        # alignment_hard: (b, t)
+        FloatTensor,        # alignment_hard: (b, tx)
         FloatTensor,        # alignment_soft: (b, tx, ty)
         FloatTensor,        # alignment_logprob: (b, 1, ty, tx)
         BoolTensor          # alignment_mas: (b, tx, ty)
     ]:
-        attn_mask = rearrange(x_mask, 'b 1 t -> b 1 t 1') * rearrange(y_mask, 'b 1 t -> b 1 1 t')
-        alignment_soft, alignment_logprob = self.aligner(rearrange(y, 'b t c -> b c t'), x, x_mask)
+        """
+        Args:
+            x: phone
+            y: mel
+        """
+        y = rearrange(y, 'b ty c -> b c ty')
+        attn_mask = rearrange(x_mask, 'b 1 tx -> b 1 tx 1') * rearrange(y_mask, 'b 1 ty -> b 1 1 ty')
+        alignment_soft, alignment_logprob = self.aligner.aligner(
+            rearrange(y, 'b ty c -> b c ty'), rearrange(x, 'b tx c -> b c tx'), x_mask
+        )
 
         assert not torch.isnan(alignment_soft).any()
 
         alignment_mas = maximum_path(
-            rearrange(alignment_soft, 'b 1 t1 t2 -> b t2 t1').contiguous(),
-            rearrange(attn_mask, 'b 1 t1 t2 -> b t1 t2').contiguous()
+            rearrange(alignment_soft, 'b 1 ty tx -> b tx ty').contiguous(),
+            rearrange(attn_mask, 'b 1 tx ty -> b tx ty').contiguous()
         )
 
         alignment_hard = torch.sum(alignment_mas, -1).float()
-        alignment_soft = rearrange(alignment_soft, 'b 1 t1 t2 -> b t2 t1')
+        alignment_soft = rearrange(alignment_soft, 'b 1 ty tx -> b tx ty')
         return alignment_hard, alignment_soft, alignment_logprob, alignment_mas
+
+    def to_phoneme_ids(self, texts, phoneme_ids):
+        if not exists(phoneme_ids):
+            assert exists(self.tokenizer)
+            phoneme_ids = self.tokenizer.texts_to_tensor_ids(texts).to(self.device)
+        return phoneme_ids
+
+    def create_cond_mask(self, batch, seq_len, training=True):
+        if training:
+            if coin_flip():
+                frac_lengths = torch.zeros((batch,), device = self.device).float().uniform_(*self.frac_lengths_mask)
+                cond_mask = mask_from_frac_lengths(seq_len, frac_lengths)
+            else:
+                cond_mask = prob_mask_like((batch, seq_len), self.p_drop_prob, self.device)
+        else:
+            cond_mask = torch.zeros((batch, seq_len), device = self.device, dtype = torch.bool)
+
+        return cond_mask
 
     @beartype
     def forward(
@@ -771,29 +788,25 @@ class DurationPredictor(Module):
         self_attn_mask = None,
         return_aligned_phoneme_ids = False
     ):
-        batch, seq_len, cond_dim = cond.shape
+        # text to phonemes, if tokenizer is given
+        phoneme_ids = self.to_phoneme_ids(texts, phoneme_ids)
 
+        # create dummy cond when not given, become purely unconditional regression model
+        if not exists(cond):
+            cond = torch.zeros_like(phoneme_ids)
+            cond_drop_prob = 1
+
+        cond = rearrange(cond, 'b t -> b t 1')
         cond = self.proj_in(cond)
 
-        # text to phonemes, if tokenizer is given
-
-        if not exists(phoneme_ids):
-            assert exists(self.tokenizer)
-            phoneme_ids = self.tokenizer.texts_to_tensor_ids(texts)
-
         # construct mask if not given
-
         if not exists(cond_mask):
-            if coin_flip():
-                frac_lengths = torch.zeros((batch,), device = self.device).float().uniform_(*self.frac_lengths_mask)
-                cond_mask = mask_from_frac_lengths(seq_len, frac_lengths)
-            else:
-                cond_mask = prob_mask_like((batch, seq_len), self.p_drop_prob, self.device)
+            batch, seq_len = phoneme_ids.shape
+            cond_mask = self.create_cond_mask(batch=batch, seq_len=seq_len)
 
         cond = cond * rearrange(~cond_mask, '... -> ... 1')
 
         # classifier free guidance
-
         if cond_drop_prob > 0.:
             cond_drop_mask = prob_mask_like(cond.shape[:1], cond_drop_prob, cond.device)
 
@@ -804,22 +817,17 @@ class DurationPredictor(Module):
             )
 
         # phoneme id of -1 is padding
-
         if not exists(self_attn_mask):
             self_attn_mask = phoneme_ids != -1
-
         phoneme_ids = phoneme_ids.clamp(min = 0)
 
         # get phoneme embeddings
-
         phoneme_emb = self.to_phoneme_emb(phoneme_ids)
 
         # force condition to be same length as input phonemes
-
         cond = curtail_or_pad(cond, phoneme_ids.shape[-1])
 
         # combine audio, phoneme, conditioning
-
         embed = torch.cat((phoneme_emb, cond), dim = -1)
         x = self.to_embed(embed)
 
@@ -899,6 +907,7 @@ class VoiceBox(Module):
         num_register_tokens = 16,
         p_drop_prob = 0.3, # p_drop in paper
         frac_lengths_mask: Tuple[float, float] = (0.7, 1.),
+        rmsnorm_shape = -1,
         condition_on_text = True
     ):
         super().__init__()
@@ -958,6 +967,7 @@ class VoiceBox(Module):
             num_register_tokens = num_register_tokens,
             adaptive_rmsnorm = True,
             adaptive_rmsnorm_cond_dim_in = time_hidden_dim,
+            rmsnorm_shape = rmsnorm_shape,
             use_gateloop_layers = use_gateloop_layers
         )
 
@@ -1026,7 +1036,7 @@ class VoiceBox(Module):
                 cond_mask = mask_from_frac_lengths(seq_len, frac_lengths)
         else:
             if not exists(cond_mask):
-                cond_mask = torch.ones((batch, seq_len), device = cond.device, dtype = torch.bool)
+                cond_mask = torch.zeros((batch, seq_len), device = cond.device, dtype = torch.bool)
 
         cond_mask_with_pad_dim = rearrange(cond_mask, '... -> ... 1')
 
@@ -1051,6 +1061,17 @@ class VoiceBox(Module):
                 rearrange(cond_drop_mask, '... -> ... 1'),
                 self.null_cond_id,
                 cond_token_ids
+            )
+        
+        # spectrogram dropout
+
+        if self.training:
+            p_drop_mask = prob_mask_like(cond.shape[:1], self.p_drop_prob, self.device)
+
+            cond = torch.where(
+                rearrange(p_drop_mask, '... -> ... 1 1'),
+                self.null_cond,
+                cond
             )
 
         # phoneme or semantic conditioning embedding
